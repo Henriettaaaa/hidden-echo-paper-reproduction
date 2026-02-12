@@ -1,0 +1,17 @@
+__pycache__/
+outputs/
+*.pyc
+*.png
+*.txt
+*.pdf
+*.csv
+*.svg
+
+*.pth
+*.pkl
+*.pt
+*.ckpt
+*.arrow
+
+dataset/
+*_model*/
