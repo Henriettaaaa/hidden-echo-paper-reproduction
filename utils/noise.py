@@ -1,6 +1,7 @@
 import torch
 from torch.distributions import Gamma
 
+# 噪声采样和 embedding 加噪
 
 # copy from SnD
 def sample_noise_Chi(d_shape, eta, device="cpu", dtype=None):

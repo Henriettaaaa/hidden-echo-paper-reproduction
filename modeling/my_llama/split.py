@@ -1191,7 +1191,7 @@ class SplittedLlamaForSequenceClassification(LlamaPreTrainedModel):
                         attention_mask=attention_mask,
                         inputs_embeds=scaled_hidden_state,
                         use_cache=False,
-                        start_layer=idx + 1,
+                        start_layer=idx + 1,                        
                     ).last_hidden_state
 
                     

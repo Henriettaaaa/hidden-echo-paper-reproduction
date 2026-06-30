@@ -27,12 +27,13 @@ from utils.noise import get_noisy_embedding, sample_noise_Chi
 
 from sklearn.metrics import mutual_info_score
 
-
+# HiddenEcho 的动态融合开关
+# 控制“上一层 denoise 输出”和“当前 server hidden state”各占多少
 class GateWrapper(nn.Module):
     def __init__(self, config: MyQwen2Config):
         super().__init__()
         self.config = config
-        self.gate_vectors = nn.ParameterList(
+        self.gate_vectors = nn.ParameterList( # 每一层一个可学习 gate 向量
             [
                 nn.Parameter(torch.zeros(config.hidden_size))
                 for _ in range(config.num_hidden_layers)
@@ -43,12 +44,12 @@ class GateWrapper(nn.Module):
         return torch.sigmoid(self.gate_vectors[layer_idx] / self.config.lst_temperature)
 
 
-
+# 客户端侧的轻量网络
 class SideTransformerStack(nn.Module):
     def __init__(self, config: MyQwen2Config):
         super().__init__()
         self.config = config
-
+        # side module 自己也有一套 transformer decoder layers
         self.dec_layers = nn.ModuleList(
             [
                 Qwen2DecoderLayer(config, layer_idx)
@@ -58,7 +59,7 @@ class SideTransformerStack(nn.Module):
         self._attn_implementation = config._attn_implementation
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.gate_vectors = GateWrapper(config)
+        self.gate_vectors = GateWrapper(config) # 每一层有一个可学习 gate
 
     def forward(
         self,
@@ -69,9 +70,9 @@ class SideTransformerStack(nn.Module):
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        output_hidden_states: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None, # 是否返回中间层
         *,
-        backbone_hidden_states: Tuple[torch.FloatTensor],
+        backbone_hidden_states: Tuple[torch.FloatTensor], # server LLM 每层 hidden state
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -113,6 +114,7 @@ class SideTransformerStack(nn.Module):
             output_attentions,
         )
 
+        # 先用本地 embedding 初始化 side 分支
         hidden_states = inputs_embeds
 
         # decoder layers
@@ -120,12 +122,15 @@ class SideTransformerStack(nn.Module):
         next_decoder_cache = None
 
         assert len(backbone_hidden_states) == self.config.num_hidden_layers
-
+        # 期望 server 返回的 hidden states 数量和 LLM 层数一致。
+        # 如果 HiddenEcho+ 跳过某些层，那些位置会是 None
+        
         all_hidden_states = None
         if output_hidden_states:
             all_hidden_states = (hidden_states,)
 
         residual_hidden_states = hidden_states
+        # HiddenEcho+ 的 layer selection：如果某层没传回来，就跳过
         for layer_idx, decoder_layer in enumerate(self.dec_layers):
             if backbone_hidden_states[layer_idx] is None:
                 continue
@@ -134,11 +139,13 @@ class SideTransformerStack(nn.Module):
             #     self.gate_vectors[layer_idx] / self.config.lst_temperature
             # )
             gate = self.gate_vectors(layer_idx)
-
+            
+            # 混合 H_i 和当前 side hidden
             hidden_states = backbone_hidden_states[layer_idx] * gate + hidden_states * (
                 1 - gate
             )
-
+            
+            # 过 side transformer 的第 i 层
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
@@ -149,7 +156,7 @@ class SideTransformerStack(nn.Module):
                 cache_position=cache_position,
             )
 
-            hidden_states = layer_outputs[0]
+            hidden_states = layer_outputs[0] # 从 Qwen2DecoderLayer 的输出取第一项，就是整个隐藏层
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
             if self.config.use_residual:
@@ -173,13 +180,15 @@ class SideTransformerStack(nn.Module):
             )
 
         return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+            last_hidden_state=hidden_states, # 复现分类任务
             past_key_values=next_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
 
     # Copied from transformers.models.llama.modeling_llama.LlamaModel._update_causal_mask
+    # 因果注意力掩码
+    # 让 side transformer 的 attention 行为和原模型一致
     def _update_causal_mask(
         self,
         attention_mask: torch.Tensor,
@@ -282,7 +291,8 @@ class SideTransformerStack(nn.Module):
 
         return causal_mask
 
-
+# HiddenEcho+ 的压缩层。
+# 对每个 hidden state 做线性下采样，把维度从 d 压到 d / r
 class HiddenDowns(nn.Module):
     def __init__(self, config: MyQwen2Config):
         super().__init__()
@@ -310,7 +320,8 @@ class HiddenDowns(nn.Module):
             for down, hidden_state in zip(self.hidden_downs, hidden_states)
         ]
 
-
+# 完整的 denoise module（去噪模块）
+# 降维 -> SideTransformerStack -> 升维
 class Ladder(nn.Module):
     def __init__(self, config: MyQwen2Config):
         super().__init__()
@@ -359,22 +370,25 @@ class ClientEmbeddingPart(nn.Module):
 
     def forward(self, input_ids):
         inputs_embeds = self.embed_tokens(input_ids)
-        clean_input_embeds = inputs_embeds
+        clean_input_embeds = inputs_embeds # 客户端词嵌入，加噪前
         noisy_input_embeds, noise = get_noisy_embedding(
             clean_input_embeds,
             self.config.privacy_budget,
             clip=self.config.clip_embedding_l2,
             noise_type=self.config.noise_type,
-        )
+        ) # 这里的噪声默认是 Chi 噪声，不是 Gaussian，在config里定义
         return clean_input_embeds, noisy_input_embeds
 
-
+# 客户端去噪入口
+# 是否启用 denoiser？
+# 用 clean embedding 还是 noisy embedding？
+# 调用真正的 Ladder。
 class ClientDenoisePart(nn.Module):
     def __init__(self, config: MyQwen2Config):
         super().__init__()
         self.config = config
         if config.lst_enable:
-            self.ladder_side = Ladder(config)
+            self.ladder_side = Ladder(config) # 包住完整的 denoise module（去噪模块）
 
     def forward(
         self,
@@ -403,7 +417,8 @@ class ClientDenoisePart(nn.Module):
         else:
             return all_hidden_states[-1], None
 
-
+# 分类头。拿去噪后的 hidden state 做线性分类，按最后一个非 padding token 聚合，计算交叉熵 / 回归损失。
+# 这和 HF 的 Qwen2ForSequenceClassification 逻辑一致。
 class ClientHeadPart(nn.Module):
     def __init__(self, config: MyQwen2Config, head: nn.Linear):
         super().__init__()
@@ -474,7 +489,8 @@ class ClientHeadPart(nn.Module):
 
 
 
-
+# 语言模型头，给生成任务留的接口
+# TODO: 似乎可能没写全
 class ClientLmHeadPart(nn.Module):
     def __init__(self, config: MyQwen2Config, head: nn.Linear):
         super().__init__()
@@ -507,7 +523,7 @@ class ClientLmHeadPart(nn.Module):
 
 
 
-
+# 对 HuggingFace Qwen2Model 的包装，以支持 start_layer，允许从中间某一层开始跑
 class MyQwen2Model(Qwen2PreTrainedModel):
 
     def __init__(self, config: MyQwen2Config, model: Qwen2Model):
@@ -543,7 +559,7 @@ class MyQwen2Model(Qwen2PreTrainedModel):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         *,
-        start_layer: int = 0,
+        start_layer: int = 0, # 改动（新增参数）
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = (
             output_attentions
@@ -582,8 +598,9 @@ class MyQwen2Model(Qwen2PreTrainedModel):
                 "Please use an appropriate `Cache` class (https://huggingface.co/docs/transformers/v4.41.3/en/internal/generation_utils#transformers.Cache)"
             )
 
+        # 支持 inputs_embeds=scaled_hidden_state
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.embed_tokens(input_ids) # 没指定层数时，默认跑全部层
 
         if cache_position is None:
             past_seen_tokens = (
@@ -613,7 +630,7 @@ class MyQwen2Model(Qwen2PreTrainedModel):
         next_decoder_cache = None
 
         
-        for decoder_layer in self.layers[start_layer:]:
+        for decoder_layer in self.layers[start_layer:]: # 改动
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -777,7 +794,7 @@ class MyQwen2Model(Qwen2PreTrainedModel):
 
         return causal_mask
 
-
+# HiddenEcho+ 的层过滤器。只传重要层
 class LayerSelect(nn.Module):
     def __init__(self, config: MyQwen2Config):
         super().__init__()
@@ -792,8 +809,15 @@ class LayerSelect(nn.Module):
         ]
 
 
-
+# 互信息估计器，是HiddenEcho+ 的约束项
+# 只在：mi_downsample_enable=True 时参与训练。
 # copy from https://github.com/Linear95/CLUB/blob/master/mi_estimators.py
+# 对应论文里的 information bottleneck（信息瓶颈）：
+# 希望 downsample 后的 hidden state：
+# 1. 少保留 noisy embedding 里的噪声信息 I(noisy_input_embeds, down_hidden_state)
+# 2. 多保留 denoised output 需要的任务信息 I(denoised_hidden_states, down_hidden_state)
+# 用两个 MINE 网络分别近似
+# 最终加到 loss
 class MINE(nn.Module):
     def __init__(self, x_dim, y_dim, hidden_size):
         super(MINE, self).__init__()
@@ -808,16 +832,18 @@ class MINE(nn.Module):
 
         y_shuffle = y_samples[random_index]
 
-        T0 = self.T_func(torch.cat([x_samples, y_samples], dim=-1))
-        T1 = self.T_func(torch.cat([x_samples, y_shuffle], dim=-1))
+        # MINE 输入拼接后的向量，维度 d + d'
+        T0 = self.T_func(torch.cat([x_samples, y_samples], dim=-1)) # 真实配对的 (x, y)--联合分布
+        T1 = self.T_func(torch.cat([x_samples, y_shuffle], dim=-1)) # 打乱配对--边缘分布
 
-        lower_bound = T0.mean() - torch.log(T1.exp().mean())
+        # 互信息下界估计（可训练），越大越好
+        lower_bound = T0.mean() - torch.log(T1.exp().mean()) 
 
         # compute the negative loss (maximise loss == minimise -loss)
         return lower_bound
 
     def learning_loss(self, x_samples, y_samples):
-        return -self.forward(x_samples, y_samples)
+        return -self.forward(x_samples, y_samples) #loss本身是越小越好，所以对 lower_bound 取负数，作为目标
 
 
 class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
@@ -827,7 +853,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         super().__init__(config)
 
         head_cls = ClientHeadPart
-        ptm_model_head = ptm_model.score
+        ptm_model_head = ptm_model.score # 取原模型的分类头
 
         
         if (config.num_hidden_layers - 1) in config.lst_skip:
@@ -838,13 +864,13 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         )
 
         self.server_backbone = MyQwen2Model(config, ptm_model.model)
-        if config.lst_enable:
+        if config.lst_enable: # 开echo
             self.server_layer_select = LayerSelect(config)
             self.server_downsample = HiddenDowns(config)
 
             self.client_denoise = ClientDenoisePart(config)
             self.client_head = head_cls(config, ptm_model_head)
-        else:
+        else: # 不加去噪模块
             self.server_head = head_cls(config, ptm_model_head)
 
         self.post_init()
@@ -853,7 +879,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         self.total_hidden_states_data_transferred = 0
 
         if config.lst_enable:
-            if config.auto_skip:
+            if config.auto_skip: # 开echo+
                 num_reserved_layers = config.num_reserved_layers + 1
             else:
                 num_reserved_layers = sum(
@@ -864,7 +890,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             reduced_hidden_size = config.hidden_size // config.lst_reduce_factor
             self.mi_estimators = [
                 (
-                    
+                    # 创建任务信息和噪声信息，加入loss
                     MINE(
                         config.hidden_size,
                         reduced_hidden_size,
@@ -888,13 +914,14 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
 
         print(f"Client params: {self._calc_client_params()}")
 
+    # 统计 embedding 上传了多少字节
     def _accumulate_embedding_data_transferred(
         self, noisy_input_embeds: torch.FloatTensor
     ):
         self.total_embedding_data_transferred += (
             noisy_input_embeds.numel() * noisy_input_embeds.element_size()
         )
-
+    # 统计 server 返回给 client 的 hidden states 通信量
     def _accumulate_hidden_states_data_transferred(
         self, all_hidden_states: list[torch.FloatTensor]
     ):
@@ -904,7 +931,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             self.total_hidden_states_data_transferred += (
                 hidden_states.numel() * hidden_states.element_size()
             )
-
+    # 计算端侧参数量
     def _calc_client_params(self):
         if not self.config.lst_enable:
             return 0
@@ -912,6 +939,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             p.numel() for p in self.client_head.parameters()
         )
 
+    # 返回输入 embedding 层
     @override
     def get_input_embeddings(self):
         return self.client_embedding.embed_tokens
@@ -933,7 +961,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-
+        # 嵌入层：加噪/不加噪
         if inputs_embeds is None:
             clean_input_embeds, noisy_input_embeds = self.client_embedding(input_ids)
             noise = (noisy_input_embeds - clean_input_embeds).detach()
@@ -944,7 +972,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
 
         
         self._accumulate_embedding_data_transferred(noisy_input_embeds)
-
+        # 经过服务器的transformer堆叠
         transformer_outputs = self.server_backbone(
             None,
             attention_mask=attention_mask,
@@ -957,14 +985,14 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             return_dict=return_dict,
             cache_position=cache_position,
         )
-
+        # 取出 server 所有 hidden states
         all_hidden_states = transformer_outputs.hidden_states
         if not output_hidden_states:
             transformer_outputs.hidden_states = None
 
         if self.config.lst_enable:
             all_hidden_states = all_hidden_states[1:]  
-            
+            # HiddenEcho+ 层选择、降维
             all_hidden_states = self.server_layer_select(all_hidden_states)
             all_hidden_states = self.server_downsample(all_hidden_states)
 
@@ -972,7 +1000,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
 
             
             self._accumulate_hidden_states_data_transferred(all_hidden_states)
-
+            # 客户端去噪
             hidden_states, all_ladder_hidden_states = self.client_denoise(
                 all_hidden_states,
                 attention_mask,
@@ -980,9 +1008,9 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
                 noisy_input_embeds,
                 output_hidden_states=output_hidden_states,
             )
-
+            # 任务头算分类 loss
             loss, pooled_logits = self.client_head(input_ids, hidden_states, labels)
-
+            # 如果启用 MI 正则，额外加 loss
             if loss is not None and self.config.mi_downsample_enable and noise is not None:
                 filtered_downsampled_hidden_states = [
                     hidden_state
@@ -1083,6 +1111,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             output.denoise_hidden_states = hidden_states
         return output
 
+    # 把预训练模型参数拷到新模块里时做 shape 对齐截断
     @classmethod
     def _init_by_ptm(cls, param_to_init: nn.Parameter, ptm_param: nn.Parameter):
         if len(param_to_init.shape) == 1:
@@ -1093,7 +1122,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             ]
         else:
             raise ValueError(f"Invalid shape: {param_to_init.shape}")
-
+    # 把原 Qwen2 的权重迁移到 split / denoise 结构里
     @classmethod
     def from_qwen2(cls, qwen2: Qwen2ForSequenceClassification | Qwen2ForCausalLM):
         config = deepcopy(qwen2.config)
@@ -1138,7 +1167,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
                         )
 
         return model
-
+    # 先载入原 Qwen2，再 调用 from_qwen2(qwen2) 改造成 split 版
     @classmethod
     @override
     def from_pretrained(
@@ -1152,7 +1181,8 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             **kwargs,
         )
         return cls.from_qwen2(qwen2)
-
+    
+    # 算每一层 hidden state 的重要性，用于 HiddenEcho+ 的层选择
     def calc_layer_attributions(self, datasets: Iterable):
         
         layer_grads_sum = 0  
@@ -1182,6 +1212,8 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
                     0, 1, STEPS, device=hidden_state.device, dtype=hidden_state.dtype
                 ):
                     scaled_hidden_state = scale_factor * hidden_state
+                    # 不是 token embedding，而是某一层的 hidden state
+                    # 本质上是“当前层输入表示”
 
                     hidden = self.server_backbone(
                         None,
@@ -1189,6 +1221,8 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
                         inputs_embeds=scaled_hidden_state,
                         use_cache=False,
                         start_layer=idx + 1,
+                        # hidden_state 是第 idx 层输出附近的表示。
+                        # 要看它对最终输出的影响，就应该从下一层继续跑，所以+1
                     ).last_hidden_state
 
                     
@@ -1206,7 +1240,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         norms = torch.norm(layer_grads_sum, dim=(1, 2))  
         topk = torch.topk(norms, self.config.num_hidden_layers)
         return topk.indices
-
+    # 把“要跳过哪些层”写进配置里
     def set_layer_skip(
         self,
         sorted_layer_indices: torch.Tensor | List[int],
@@ -1220,6 +1254,7 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         skip_layers = set(range(self.config.num_hidden_layers)) - set(
             sorted_layer_indices
         )
+        # 是否强制保留最后一层
         if keep_last_layer:
             skip_layers -= {self.config.num_hidden_layers - 1}
         skip_layers = list(skip_layers)

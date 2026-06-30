@@ -18,6 +18,7 @@ from transformers.models.qwen2.modeling_qwen2 import Qwen2ForCausalLM
 from modeling.my.configuration import MyQwen2Config, AdditionalConfig
 from modeling.my.split import SplittedQwen2ForSequenceClassification
 
+# 模型加载、checkpoint 恢复、参数解析、随机种子
 
 def get_base_classification_model_for_training(
     num_labels: int = 2,

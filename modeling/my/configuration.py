@@ -5,22 +5,25 @@ from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 class AdditionalConfig:
     def __init__(
         self,
+        # DP 噪声相关
         privacy_budget: float = 100.0,
         clip_embedding_l2: bool = True,
         noise_type: Literal["Chi", "Gaussian"] = "Chi",
+        # HiddenEcho 主体
         lst_reduce_factor: int = 8,
         lst_skip: list[int] = [-1],
         lst_temperature: float = 0.1,
         lst_input_type: Literal["clean", "noisy"] = "clean",
         lst_enable: bool = True,
         lst_random_init: bool = False,
+        # HiddenEcho+ 的层选择
         auto_skip: bool = False,
         num_reserved_layers: int = 1,
         num_integrate_step: int = 5,
         num_samples: int = 32,
         keep_last_layer: bool = False,
         num_integrate_batch_size: int = 4,
-        
+        # mi_* 是信息瓶颈约束
         mi_downsample_enable: bool = True,
         mi_estimator_iter_num: int = 2,
         mi_estimator_lr: float = 1e-4,
@@ -68,7 +71,7 @@ class AdditionalConfig:
         self.model_cls_module: str | None = kwargs.get("model_cls_module", None)
         self.model_cls_name: str | None = kwargs.get("model_cls_name", None)
 
-
+# 把额外参数挂到 HF 的 Qwen2Config 上
 class MyQwen2Config(Qwen2Config, AdditionalConfig):
     def __init__(
         self,
