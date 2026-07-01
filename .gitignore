@@ -1,5 +1,6 @@
 __pycache__/
 outputs/
+logs/
 *.pyc
 *.png
 *.txt

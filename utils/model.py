@@ -113,6 +113,7 @@ def load_classification_model_checkpoint(
 class TrainArgs:
     experiment_name: str
     dataset_name: str
+    financial_phrasebank_config: str
     model_path: str
     num_train_epochs: int
     learning_rate: float
@@ -130,6 +131,12 @@ def parse_args_for_model_train_options():
 
     parser.add_argument("--experiment_name", type=str, default="default")
     parser.add_argument("--dataset_name", type=str, default="mrpc")
+    parser.add_argument(
+        "--financial_phrasebank_config",
+        type=str,
+        default="sentences_50agree",
+        choices=["sentences_50agree", "sentences_allagree"],
+    )
     parser.add_argument("--model_path", type=str, default="Qwen2-1.5B-Instruct")
 
     parser.add_argument("--num_train_epochs", type=int, default=6)
@@ -155,6 +162,7 @@ def parse_args_for_model_train_options():
     train_args = TrainArgs(
         experiment_name=args.experiment_name,
         dataset_name=args.dataset_name,
+        financial_phrasebank_config=args.financial_phrasebank_config,
         model_path=args.model_path,
         num_train_epochs=args.num_train_epochs,
         learning_rate=args.learning_rate,

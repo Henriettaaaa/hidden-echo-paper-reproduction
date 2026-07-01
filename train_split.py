@@ -40,6 +40,46 @@ import json
 setup_seed(12399)
 
 
+def get_financial_phrasebank_splits(config_name: str):
+    ds = datasets.load_dataset("financial_phrasebank", config_name, revision="main")["train"]
+
+    if config_name == "sentences_50agree":
+        split = ds.train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
+        dev_test = split["test"].train_test_split(test_size=0.5, seed=123)
+        return {
+            "train": split["train"],
+            "validation": dev_test["train"],
+            "test": dev_test["test"],
+        }
+
+    if config_name == "sentences_allagree":
+        expected_size = 1811 + 226 + 227
+        if len(ds) != expected_size:
+            raise ValueError(
+                f"Expected financial_phrasebank/{config_name} to contain "
+                f"{expected_size} rows, got {len(ds)}"
+            )
+        split = ds.train_test_split(
+            train_size=1811,
+            test_size=226 + 227,
+            seed=123,
+            stratify_by_column="label",
+        )
+        dev_test = split["test"].train_test_split(
+            train_size=226,
+            test_size=227,
+            seed=123,
+            stratify_by_column="label",
+        )
+        return {
+            "train": split["train"],
+            "validation": dev_test["train"],
+            "test": dev_test["test"],
+        }
+
+    raise ValueError(f"Unknown financial_phrasebank config: {config_name}")
+
+
 def main():
     args = parse_args_for_model_train_options()
     print(args)
@@ -136,6 +176,7 @@ def main():
         model_name=model_name,
         model_max_len=model_max_len,
         dataset_name=dataset_name,
+        financial_phrasebank_config=args.financial_phrasebank_config,
         num_train_epochs=num_train_epochs,
         learning_rate=learning_rate,
         save_steps=save_steps if save_strategy == "steps" else None,
@@ -205,6 +246,7 @@ def train(
     model_name="Qwen2-1.5B-Instruct",
     model_max_len=512,
     dataset_name="mrpc",
+    financial_phrasebank_config="sentences_50agree",
     num_train_epochs=4,
     save_strategy="steps",
     save_steps=2000,
@@ -225,6 +267,7 @@ def train(
 ):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    test_datasets = None
 
     if dataset_name == "mrpc":
         num_labels = 2
@@ -246,11 +289,17 @@ def train(
     elif dataset_name == "financial_phrasebank":
         num_labels = 3
         
-        ds = datasets.load_dataset('financial_phrasebank', 'sentences_50agree', revision='main')
-        ds = ds['train'].train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
+        ds = get_financial_phrasebank_splits(financial_phrasebank_config)
 
         train_datasets = ds["train"]
-        val_datasets = ds["test"]
+        val_datasets = ds["validation"]
+        test_datasets = ds["test"]
+        print(
+            "financial_phrasebank "
+            f"{financial_phrasebank_config} split sizes: "
+            f"train={len(train_datasets)}, validation={len(val_datasets)}, "
+            f"test={len(test_datasets)}"
+        )
         def preprocess_function(examples):
             return tokenizer(
                 examples["sentence"],
@@ -334,10 +383,13 @@ def train(
 
     tokenized_train_dataset = train_datasets.map(preprocess_function, batched=True)
     tokenized_val_dataset = val_datasets.map(preprocess_function, batched=True)
-    
-    ds_split = tokenized_val_dataset.train_test_split(test_size=0.5, seed=123)
-    tokenized_val_dataset = ds_split["train"]
-    tokenized_test_dataset = ds_split["test"]
+
+    if test_datasets is None:
+        ds_split = tokenized_val_dataset.train_test_split(test_size=0.5, seed=123)
+        tokenized_val_dataset = ds_split["train"]
+        tokenized_test_dataset = ds_split["test"]
+    else:
+        tokenized_test_dataset = test_datasets.map(preprocess_function, batched=True)
 
     if custom_config.auto_skip:
         if dataset_name == "SetFit/bbc-news":
