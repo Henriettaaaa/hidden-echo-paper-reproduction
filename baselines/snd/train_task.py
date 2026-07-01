@@ -44,7 +44,7 @@ import torch.utils.data
 import json
 
 from baselines.snd.modeling import DenoiseModel, Qwen2ForSequenceClassification, DenoiseModelLlama, LlamaForSequenceClassification
-from baselines.snd.data import MixDatasetLoad, MixDatasetDump, load_dataset
+from baselines.snd.data import MixDatasetLoad, MixDatasetDump, ensure_padding_token, load_dataset
 
 import argparse
 
@@ -109,7 +109,7 @@ def main():
     }
     
     if "Qwen2" in model_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer = ensure_padding_token(AutoTokenizer.from_pretrained(model_name))
         model = Qwen2ForSequenceClassification.from_pretrained(
             model_name,
             num_labels=dataset_labels[dataset_name],
@@ -127,8 +127,7 @@ def main():
         ).cuda().eval()
 
     elif "Llama" in model_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer = ensure_padding_token(AutoTokenizer.from_pretrained(model_name))
         model = LlamaForSequenceClassification.from_pretrained(
             model_name,
             num_labels=dataset_labels[dataset_name],

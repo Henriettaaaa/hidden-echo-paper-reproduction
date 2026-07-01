@@ -47,6 +47,14 @@ import json
 from pathlib import Path
 import datasets
 
+
+def ensure_padding_token(tokenizer):
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is None:
+            raise ValueError("Tokenizer must define eos_token_id when pad_token_id is missing.")
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
 class MixDatasetDump(torch.utils.data.Dataset):
     def __init__(self, model, tokenizer, privacy_budget):
         
@@ -214,14 +222,18 @@ if __name__ == "__main__":
     model_type = args.model_type
     if model_type == "qwen2":
         model_name = args.model_name
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = Qwen2ForSequenceClassification.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda")
+        tokenizer = ensure_padding_token(AutoTokenizer.from_pretrained(model_name))
+        model = Qwen2ForSequenceClassification.from_pretrained(
+            model_name,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+            pad_token_id=tokenizer.pad_token_id,
+        )
         model.eval()
         budgets = args.privacy_budgets
     elif model_type == "llama":
         model_name = args.model_name
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer = ensure_padding_token(AutoTokenizer.from_pretrained(model_name))
         model = LlamaForSequenceClassification.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda", pad_token_id=tokenizer.pad_token_id)
         model.eval()
         budgets = args.privacy_budgets

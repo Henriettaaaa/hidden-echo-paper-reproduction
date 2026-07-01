@@ -44,7 +44,7 @@ import torch.utils.data
 import json
 
 from baselines.snd.modeling import DenoiseModel, DenoiseModelLlama
-from baselines.snd.data import MixDatasetLoad, MixDatasetDump, load_dataset
+from baselines.snd.data import MixDatasetLoad, MixDatasetDump, ensure_padding_token, load_dataset
 import argparse
 
 setup_seed(12399)
@@ -69,7 +69,7 @@ def main():
         model_name = args.model_name
         denoise_model_cls = DenoiseModel
         save_dir = "denoise_model"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer = ensure_padding_token(AutoTokenizer.from_pretrained(model_name))
         model = denoise_model_cls.from_pretrained(
             model_name,
             pad_token_id=tokenizer.pad_token_id,
@@ -80,8 +80,7 @@ def main():
         model_name = args.model_name
         denoise_model_cls = DenoiseModelLlama
         save_dir = "denoise_model_llama"
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer = ensure_padding_token(AutoTokenizer.from_pretrained(model_name))
         model = denoise_model_cls.from_pretrained(
             model_name,
             pad_token_id=tokenizer.pad_token_id,
