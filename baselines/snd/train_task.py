@@ -61,6 +61,14 @@ def main():
     arg_parser.add_argument("--num_train_epochs", type=int, default=10)
     arg_parser.add_argument("--learning_rate", type=float, default=1e-4)
     arg_parser.add_argument("--lora_r", type=int, default=16)
+    arg_parser.add_argument(
+        "--financial_phrasebank_config",
+        type=str,
+        default="sentences_50agree",
+        choices=["sentences_50agree", "sentences_allagree"],
+    )
+    arg_parser.add_argument("--lr_scheduler_type", type=str, default="constant")
+    arg_parser.add_argument("--output_dir", type=str, default=None)
 
     args = arg_parser.parse_args()
     
@@ -166,8 +174,13 @@ def main():
         per_device_eval_batch_size=per_device_eval_batch_size,
         use_cpu=use_cpu,
         lora_r=lora_r,
-        save_path=Path(__file__).parent / save_dir / f"{dataset_name}_{privacy_budget}",
-        lr_scheduler_type="constant",
+        save_path=(
+            Path(args.output_dir)
+            if args.output_dir is not None
+            else Path(__file__).parent / save_dir / f"{dataset_name}_{privacy_budget}"
+        ),
+        lr_scheduler_type=args.lr_scheduler_type,
+        financial_phrasebank_config=args.financial_phrasebank_config,
     )
 
 
@@ -240,6 +253,7 @@ def train(
     lora_r=64,
     save_path="./ckpt",
     lr_scheduler_type="warmup_stable_decay",
+    financial_phrasebank_config="sentences_50agree",
 ):
 
     if dataset_name == "mrpc":
@@ -261,12 +275,41 @@ def train(
             
     elif dataset_name == "financial_phrasebank":
         num_labels = 3
-        
-        ds = datasets.load_dataset('financial_phrasebank', 'sentences_50agree', revision='main')
-        ds = ds['train'].train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
 
-        train_datasets = ds["train"]
-        val_datasets = ds["test"]
+        ds = datasets.load_dataset(
+            "financial_phrasebank",
+            financial_phrasebank_config,
+            revision="main",
+        )["train"]
+
+        if financial_phrasebank_config == "sentences_allagree":
+            expected_size = 1811 + 226 + 227
+            if len(ds) != expected_size:
+                raise ValueError(
+                    f"Expected financial_phrasebank/{financial_phrasebank_config} "
+                    f"to contain {expected_size} rows, got {len(ds)}"
+                )
+            split = ds.train_test_split(
+                train_size=1811,
+                test_size=226 + 227,
+                seed=123,
+                stratify_by_column="label",
+            )
+            dev_test = split["test"].train_test_split(
+                train_size=226,
+                test_size=227,
+                seed=123,
+                stratify_by_column="label",
+            )
+            train_datasets = split["train"]
+            val_datasets = dev_test["train"]
+            test_datasets = dev_test["test"]
+        else:
+            ds = ds.train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
+            train_datasets = ds["train"]
+            val_datasets = ds["test"]
+            test_datasets = ds["test"]
+
         def preprocess_function(examples):
             return tokenizer(
                 examples["sentence"],
@@ -294,10 +337,13 @@ def train(
 
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
+    if dataset_name != "financial_phrasebank":
+        test_datasets = val_datasets
 
     columns = ["input_ids", "attention_mask", "label"]
     tokenized_train_datasets = train_datasets.map(preprocess_function, batched=True).select_columns(columns).rename_column("label", "labels")
     tokenized_val_datasets = val_datasets.map(preprocess_function, batched=True).select_columns(columns).rename_column("label", "labels")
+    tokenized_test_datasets = test_datasets.map(preprocess_function, batched=True).select_columns(columns).rename_column("label", "labels")
 
     
 
@@ -387,7 +433,7 @@ def train(
     eval_results = {}
 
     for _ in range(5):
-        eval_result = trainer.evaluate(tokenized_val_datasets)
+        eval_result = trainer.evaluate(tokenized_test_datasets)
         for k, v in eval_result.items():
             if k not in eval_results:
                 eval_results[k] = []
@@ -405,4 +451,5 @@ def train(
     with open(f"{save_path}/eval_results.txt", "w") as f:
         f.write(json.dumps(final_eval_results))
 
-main()
+if __name__ == "__main__":
+    main()

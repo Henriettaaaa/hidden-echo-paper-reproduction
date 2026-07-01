@@ -1205,35 +1205,99 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
             for idx, hidden_state in enumerate(batch_all_hidden_states[:-1]):
                 hidden_state.requires_grad_()
 
-                
-                integrated_grad = 0  
-                STEPS = self.config.num_integrate_step
-                for scale_factor in torch.linspace(
-                    0, 1, STEPS, device=hidden_state.device, dtype=hidden_state.dtype
-                ):
-                    scaled_hidden_state = scale_factor * hidden_state
-                    # 不是 token embedding，而是某一层的 hidden state
-                    # 本质上是“当前层输入表示”
+                # # HiddenEcho+ 的梯度积分层选择
+                # integrated_grad = 0  
+                # STEPS = self.config.num_integrate_step
+                # for scale_factor in torch.linspace(
+                #     0, 1, STEPS, device=hidden_state.device, dtype=hidden_state.dtype
+                # ):
+                #     scaled_hidden_state = scale_factor * hidden_state
+                #     # 不是 token embedding，而是某一层的 hidden state
+                #     # 本质上是“当前层输入表示”
 
+                #     hidden = self.server_backbone(
+                #         None,
+                #         attention_mask=attention_mask,
+                #         inputs_embeds=scaled_hidden_state,
+                #         use_cache=False,
+                #         start_layer=idx + 1,
+                #         # hidden_state 是第 idx 层输出附近的表示。
+                #         # 要看它对最终输出的影响，就应该从下一层继续跑，所以+1
+                #     ).last_hidden_state
+
+                    
+                #     grad = torch.autograd.grad(
+                #         hidden.mean(),
+                #         scaled_hidden_state,
+                #     )[0]
+                #     grad_sum = grad.sum(dim=0)  
+                #     integrated_grad += grad_sum  
+                # integrated_grad = integrated_grad * (1 / (STEPS - 1))  
+                # layer_grads.append(integrated_grad)
+
+                # TODO:HiddenEcho+ 的梯度积分层选择 修正，以及可能的修改
+                # Σ_j ∂H_{L-1} / ∂H_i |_{H_i = (j/m)H_i}
+                # 仍然用 hidden.mean() 作为 scalarization。更接近公式，但不是完整 Jacobian。
+                # 如果要 task-aware，则目标应改成 task logit 或 loss，例如分类任务的 gold-label logit / loss      
+                
+                integrated_grad = 0 # 累计梯度求和项
+                STEPS = self.config.num_integrate_step
+
+                for step in range(1, STEPS + 1):
+                    # 论文公式 j = 1 ... m，插值点是 (j/m) * H_i。
+                    # 不包含 0，包含原始 hidden_state。
+                    scale_factor = step / STEPS
+                    
+                    # detach()，切断它和前面 forward graph 的关系，避免反复回传到更早层；让每个积分点成为独立求梯度的输入。
+                    # requires_grad_(True)，计算最终 hidden 对当前 H_hat_i 的梯度。
+                    scaled_hidden_state = ( # 当前积分点上的 hidden state
+                        scale_factor * hidden_state
+                    ).detach().requires_grad_(True)
+
+                    # hidden_states是第 idx 层输出，
+                    # 要估计它对最终 hidden 的影响，需要把它作为下一层输入。
+                    # 从第 idx + 1 层继续 forward
                     hidden = self.server_backbone(
                         None,
                         attention_mask=attention_mask,
                         inputs_embeds=scaled_hidden_state,
                         use_cache=False,
                         start_layer=idx + 1,
-                        # hidden_state 是第 idx 层输出附近的表示。
-                        # 要看它对最终输出的影响，就应该从下一层继续跑，所以+1
                     ).last_hidden_state
 
-                    
+                    # 将最终 hidden state 标量化。
+                    # 这。
+                    # 如果要做 task-aware attribution，应把这里换成 task logit 或 loss。
+                    # 返回形状与 scaled_hidden_state 相同：[batch_size, seq_len, hidden_dim]
                     grad = torch.autograd.grad(
                         hidden.mean(),
                         scaled_hidden_state,
                     )[0]
-                    grad_sum = grad.sum(dim=0)  
-                    integrated_grad += grad_sum  
-                integrated_grad = integrated_grad * (1 / (STEPS - 1))  
-                layer_grads.append(integrated_grad)
+                    
+                    integrated_grad += grad # 累计所有积分点的梯度（沿路径的平均敏感度）
+
+                avg_grad = integrated_grad / STEPS
+
+                #  H_i 乘子： 该层实际激活值
+                contribution = hidden_state * avg_grad
+
+                # 如果存在 padding，需要避免 padding token 参与层贡献统计。
+                # attention_mask:[batch_size, seq_len]
+                # valid_token_mask:[batch_size, seq_len, 1]
+                valid_token_mask = attention_mask.unsqueeze(-1).to(
+                    dtype=contribution.dtype,
+                    device=contribution.device,
+                )
+
+                contribution = contribution * valid_token_mask
+
+                # 对 batch 维度取平均。
+                # 输出形状：[seq_len, hidden_dim]
+                layer_contribution = contribution.sum(dim=0) / valid_token_mask.sum(
+                    dim=0
+                ).clamp_min(1.0)
+
+                layer_grads.append(layer_contribution)
 
             layer_grads_sum += torch.stack(layer_grads)
 

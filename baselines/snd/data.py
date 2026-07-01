@@ -36,6 +36,11 @@ from modeling.my.configuration import AdditionalConfig
 from baselines.snd.modeling import Qwen2ForSequenceClassification, LlamaForSequenceClassification
 from torch.utils.data import DataLoader
 import datasets
+import argparse
+
+
+def get_snd_cache_root():
+    return Path(os.environ.get("SND_CACHE_DIR", "/data/songhanlin/tmp/snd-cache"))
 import torch.nn.functional
 import torch.utils.data
 import json
@@ -151,13 +156,18 @@ class MixDatasetLoad(torch.utils.data.Dataset):
         
         return res
         
-def gen_dataset(model, tokenizer, privacy_budgets):
+def gen_dataset(model, tokenizer, privacy_budgets, model_type="qwen2"):
     
     chunk_size = 2048000
     
     for budget in privacy_budgets:
         dataset = MixDatasetDump(model, tokenizer, budget)
-        dataset_dir = Path(__file__).parent / "mixed_datasets_llama" / f"{budget}"
+        if model_type == "qwen2":
+            dataset_dir = get_snd_cache_root() / "mixed_datasets" / f"{budget}"
+        elif model_type == "llama":
+            dataset_dir = get_snd_cache_root() / "mixed_datasets_llama" / f"{budget}"
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
         dataset_dir.mkdir(parents=True, exist_ok=True)
         
         data_loader = DataLoader(dataset, batch_size=64, collate_fn=dataset.collate_fn, shuffle=False)
@@ -184,30 +194,35 @@ def gen_dataset(model, tokenizer, privacy_budgets):
 
 def load_dataset(privacy_budget, tokenizer, model_type="qwen2"):
     if model_type == "qwen2":
-        dataset_dir = Path(__file__).parent / "mixed_datasets" / f"{privacy_budget}"
-        clean_dataset_dir = Path(__file__).parent / "mixed_datasets" / f"0"
+        dataset_dir = get_snd_cache_root() / "mixed_datasets" / f"{privacy_budget}"
+        clean_dataset_dir = get_snd_cache_root() / "mixed_datasets" / "0"
     elif model_type == "llama":
-        dataset_dir = Path(__file__).parent / "mixed_datasets_llama" / f"{privacy_budget}"
-        clean_dataset_dir = Path(__file__).parent / "mixed_datasets_llama" / "0"
+        dataset_dir = get_snd_cache_root() / "mixed_datasets_llama" / f"{privacy_budget}"
+        clean_dataset_dir = get_snd_cache_root() / "mixed_datasets_llama" / "0"
     loaded_dataset = MixDatasetLoad(dataset_dir, clean_dataset_dir, tokenizer)
     # print(f"Loaded dataset length: {len(loaded_dataset)}")
     # print(f"First item: {loaded_dataset[0]}")
     return loaded_dataset
 
 if __name__ == "__main__":
-    # model_type = "qwen2"
-    model_type = "llama"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_type", choices=["qwen2", "llama"], default="qwen2")
+    parser.add_argument("--model_name", type=str, default="Qwen2-1.5B-Instruct")
+    parser.add_argument("--privacy_budgets", nargs="+", type=int, default=[0, 1000])
+    args = parser.parse_args()
+
+    model_type = args.model_type
     if model_type == "qwen2":
-        model_name = "Qwen2-1.5B-Instruct"
+        model_name = args.model_name
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = Qwen2ForSequenceClassification.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda")
         model.eval()
-        budgets = [0, 100, 1000, 5000, 6000]
+        budgets = args.privacy_budgets
     elif model_type == "llama":
-        model_name = "Llama-3.2-1B-Instruct"
+        model_name = args.model_name
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tokenizer.pad_token_id = tokenizer.eos_token_id
         model = LlamaForSequenceClassification.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda", pad_token_id=tokenizer.pad_token_id)
         model.eval()
-        budgets = [0, 1000, 4000, 5000] 
-    gen_dataset(model, tokenizer, budgets)
+        budgets = args.privacy_budgets
+    gen_dataset(model, tokenizer, budgets, model_type=model_type)

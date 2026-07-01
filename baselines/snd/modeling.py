@@ -3,6 +3,7 @@ import math
 from typing import List, Optional, Tuple, Union
 
 import torch
+import os
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
@@ -33,6 +34,11 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaModel, LlamaPreTrainedModel
 
 from utils.noise import get_noisy_embedding
+
+
+def _clip_embedding_l2_enabled():
+    value = os.environ.get("SND_CLIP_EMBEDDING_L2", "true").lower()
+    return value in {"1", "true", "yes", "y"}
 
 
 class DenoiseModel(Qwen2PreTrainedModel):
@@ -232,7 +238,12 @@ class Qwen2ForSequenceClassification(Qwen2PreTrainedModel):
         
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids.cuda())
-            inputs_embeds, noise = get_noisy_embedding(inputs_embeds, privacy_budget, True, model_type="qwen2-1.5b")
+            inputs_embeds, noise = get_noisy_embedding(
+                inputs_embeds,
+                privacy_budget,
+                _clip_embedding_l2_enabled(),
+                model_type="qwen2-1.5b",
+            )
         else:
             noise = torch.zeros(inputs_embeds.shape, device=inputs_embeds.device)
 
@@ -367,7 +378,12 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
         
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids.cuda())
-            inputs_embeds, noise = get_noisy_embedding(inputs_embeds, privacy_budget, True, model_type="llama-3.2-1b")
+            inputs_embeds, noise = get_noisy_embedding(
+                inputs_embeds,
+                privacy_budget,
+                _clip_embedding_l2_enabled(),
+                model_type="llama-3.2-1b",
+            )
         else:
             noise = torch.zeros(inputs_embeds.shape, device=inputs_embeds.device)
 
@@ -454,6 +470,5 @@ class LlamaForSequenceClassification(LlamaPreTrainedModel):
         output.noise = noise
         output.noisy_embeds = inputs_embeds
         return output
-
 
 

@@ -45,46 +45,65 @@ import json
 
 from baselines.snd.modeling import DenoiseModel, DenoiseModelLlama
 from baselines.snd.data import MixDatasetLoad, MixDatasetDump, load_dataset
+import argparse
 
 setup_seed(12399)
 
 
 def main():
-    privacy_budget = 4000
-    
-    
-    # model_name = "Qwen2-1.5B-Instruct"
-    # denoise_model_cls = DenoiseModel
-    # save_dir = "denoise_model_qwen2"
-    
-    model_name = "Llama-3.2-1B-Instruct"
-    denoise_model_cls = DenoiseModelLlama
-    save_dir = "denoise_model_llama"
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument("--privacy_budget", type=int, default=1000)
+    arg_parser.add_argument("--model_name", type=str, default="Qwen2-1.5B-Instruct")
+    arg_parser.add_argument("--model_type", choices=["qwen2", "llama"], default="qwen2")
+    arg_parser.add_argument("--num_train_epochs", type=int, default=1)
+    arg_parser.add_argument("--learning_rate", type=float, default=1e-4)
+    arg_parser.add_argument("--per_device_train_batch_size", type=int, default=2)
+    arg_parser.add_argument("--per_device_eval_batch_size", type=int, default=8)
+    arg_parser.add_argument("--lora_r", type=int, default=64)
+    arg_parser.add_argument("--lr_scheduler_type", type=str, default="constant")
+    args = arg_parser.parse_args()
+
+    privacy_budget = args.privacy_budget
+
+    if args.model_type == "qwen2":
+        model_name = args.model_name
+        denoise_model_cls = DenoiseModel
+        save_dir = "denoise_model"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = denoise_model_cls.from_pretrained(
+            model_name,
+            pad_token_id=tokenizer.pad_token_id,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+        )
+    elif args.model_type == "llama":
+        model_name = args.model_name
+        denoise_model_cls = DenoiseModelLlama
+        save_dir = "denoise_model_llama"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        model = denoise_model_cls.from_pretrained(
+            model_name,
+            pad_token_id=tokenizer.pad_token_id,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda",
+        )
+    else:
+        raise ValueError(f"Unknown model_type: {args.model_type}")
 
     save_strategy = "epoch"
     save_steps = 100
     evaluation_strategy=None
     eval_steps = 100
 
-    per_device_train_batch_size = 2
-    per_device_eval_batch_size = 8
+    per_device_train_batch_size = args.per_device_train_batch_size
+    per_device_eval_batch_size = args.per_device_eval_batch_size
     use_cpu = False
 
-    num_train_epochs = 1
-    learning_rate = 1e-4
+    num_train_epochs = args.num_train_epochs
+    learning_rate = args.learning_rate
 
-    lora_r = 64
-
-    
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    model = denoise_model_cls.from_pretrained(
-        model_name,
-        pad_token_id=tokenizer.pad_token_id,
-        torch_dtype=torch.bfloat16, 
-        device_map="cuda"
-    )
-    
+    lora_r = args.lora_r
     
     train(
         model,
@@ -102,7 +121,8 @@ def main():
         use_cpu=use_cpu,
         lora_r=lora_r,
         save_path=Path(__file__).parent / save_dir / f"{privacy_budget}",
-        lr_scheduler_type="constant",
+        lr_scheduler_type=args.lr_scheduler_type,
+        model_type=args.model_type,
     )
 
 
@@ -174,9 +194,10 @@ def train(
     lora_r=64,
     save_path="./ckpt",
     lr_scheduler_type="warmup_stable_decay",
+    model_type="qwen2",
 ):
 
-    dataset = load_dataset(privacy_budget, tokenizer, model_type="llama")
+    dataset = load_dataset(privacy_budget, tokenizer, model_type=model_type)
 
     
 
@@ -235,4 +256,6 @@ def train(
 
     trainer.train()
 
-main()
+
+if __name__ == "__main__":
+    main()
