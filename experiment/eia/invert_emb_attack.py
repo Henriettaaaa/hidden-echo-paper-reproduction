@@ -17,7 +17,7 @@ from torch import nn
 
 from baselines.gan.gan_modeling import Generator
 
-p = 'Qwen2-1.5B-Instruct'
+p = '/data/songhanlin/models/Qwen2-1.5B-Instruct'
 model_type = 'qwen2-1.5b'
 # p = 't5-large'
 # model_type = 't5-large'
@@ -38,8 +38,8 @@ if is_gan:
     ).to(torch.bfloat16).cuda()
 
 
-dataset_name = "mrpc"
-# dataset_name = "financial_phrasebank"
+# dataset_name = "mrpc"
+dataset_name = "financial_phrasebank"
 # dataset_name = "SetFit/bbc-news"
 # dataset_name = "dailymail"
 # dataset_name = "samsum"
@@ -59,7 +59,7 @@ if dataset_name == "mrpc":
     text_keys = ["sentence1", "sentence2"]
         
 elif dataset_name == "financial_phrasebank":
-    ds = datasets.load_dataset('financial_phrasebank', 'sentences_50agree', revision='main')
+    ds = datasets.load_dataset('financial_phrasebank', 'sentences_allagree', revision='main')
     ds = ds['train'].train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
 
     train_datasets = ds["train"]

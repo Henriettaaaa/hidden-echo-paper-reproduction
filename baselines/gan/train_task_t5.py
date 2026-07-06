@@ -46,6 +46,19 @@ setup_seed(12399)
 import argparse
 
 
+def load_first_available_dataset(candidates):
+    errors = []
+    for candidate in candidates:
+        try:
+            if isinstance(candidate, tuple):
+                name, config = candidate
+                return datasets.load_dataset(name, config)
+            return datasets.load_dataset(candidate)
+        except Exception as exc:
+            errors.append(f"{candidate}: {type(exc).__name__}: {str(exc).splitlines()[0][:160]}")
+    raise RuntimeError("Unable to load dataset from candidates:\n" + "\n".join(errors))
+
+
 def main():
     
     parser = argparse.ArgumentParser()
@@ -101,7 +114,8 @@ def main():
         raise ValueError(f"Unknown model name: {model_name}")
     
     generator_checkpoint_path = Path(__file__).parent / generator_checkpoint_dirname / f"{dataset_name}_privacy_{privacy_budget}/epoch_{generator_epoch}/generator.pth"
-    generator = Generator.from_pretrained(generator_checkpoint_path, model_config.hidden_size, model_config.hidden_size, 2).to(torch.bfloat16).eval().cuda()
+    hidden_size = getattr(model_config, "hidden_size", model_config.d_model)
+    generator = Generator.from_pretrained(generator_checkpoint_path, hidden_size, hidden_size, 2).to(torch.bfloat16).eval().cuda()
 
     if "t5" in model_name:
         llm_type = "t5-large"
@@ -221,10 +235,21 @@ def train(
 
 
     if dataset_name == "dailymail":
-        ds = datasets.load_dataset('cnn_dailymail_short')
+        local_path = Path("dataset/cnn_dailymail_short")
+        ds = (
+            datasets.load_dataset(local_path.as_posix())
+            if local_path.exists()
+            else load_first_available_dataset(
+                [
+                    "cnn_dailymail_short",
+                    "determined-ai/cnn_dailymail_short",
+                ]
+            )
+        )
 
         train_datasets = ds["train"]
         val_datasets = ds["validation"]
+        test_datasets = ds["test"] if "test" in ds else ds["validation"]
 
         input_field = "article"
         label_field = "highlights"
@@ -238,6 +263,7 @@ def train(
 
         train_datasets = ds["train"]
         val_datasets = ds["validation"]
+        test_datasets = ds["test"] if "test" in ds else ds["validation"]
 
         input_field = "dialogue"
         label_field = "summary"
@@ -251,6 +277,7 @@ def train(
         ds = ds.train_test_split(test_size=0.1, seed=123)
         train_datasets = ds["train"]
         val_datasets = ds["test"]
+        test_datasets = ds["test"]
         
         input_field = "en"
         label_field = "fr"
@@ -292,10 +319,11 @@ def train(
 
     tokenized_train_dataset = train_datasets.map(preprocess_function, batched=True)
     tokenized_val_dataset = val_datasets.map(preprocess_function, batched=True)
+    tokenized_test_dataset = test_datasets.map(preprocess_function, batched=True)
 
 
     lora_config = LoraConfig(
-        task_type=TaskType.SEQ_CLS,
+        task_type=TaskType.SEQ_2_SEQ_LM,
         inference_mode=False,
         r=lora_r,
         lora_alpha=16,
@@ -385,7 +413,7 @@ def train(
 
     trained_model = trainer.model            
 
-    data_loader = DataLoader(tokenized_val_dataset.remove_columns(val_datasets.column_names), 
+    data_loader = DataLoader(tokenized_test_dataset.remove_columns(test_datasets.column_names),
                                 batch_size=per_device_eval_batch_size, 
                                 collate_fn=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True, label_pad_token_id=-100)
                                 )
@@ -405,7 +433,7 @@ def train(
             reference = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
             # reference = label_text
             print(list(zip(generate_text,reference )))
-            bleu_metric.add_batch(predictions=generate_text, references=reference)
+            bleu_metric.add_batch(predictions=generate_text, references=[[ref] for ref in reference])
             rouge_metric.add_batch(predictions=generate_text, references=reference)
 
         eval_results.setdefault("bleu", [])

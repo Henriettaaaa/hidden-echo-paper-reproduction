@@ -53,7 +53,7 @@ def get_noisy_embedding(
     if model_type == "qwen2-1.5b":
         max_norm = 0.974
     elif model_type == "t5-large":
-        max_norm = 650
+        max_norm = 700
     elif model_type == "llama-3.2-1b":
         max_norm = 1.204
     else:

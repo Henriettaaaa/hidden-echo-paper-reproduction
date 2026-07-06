@@ -193,6 +193,13 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--attribute", type=str)
     parser.add_argument("--base_batch_size", type=int, default=6)
+    parser.add_argument("--method_name", type=str, default="unknown")
+    parser.add_argument(
+        "--education_label_mode",
+        type=str,
+        default="original",
+        choices=["original", "h4_4class"],
+    )
     parser.add_argument("--write_to_file", type=str)
 
     args = parser.parse_args()
@@ -245,6 +252,24 @@ if __name__ == "__main__":
     ds = ds.select_columns(["tweet_hashed", "age", "education"])
     ds = ds.rename_column("tweet_hashed", "text")
     # ds = ds.rename_column(args.attribute, "label")
+
+    if args.education_label_mode == "h4_4class":
+        def add_h4_education_label(example):
+            education = example["education"]
+            if education in [1, 2]:
+                label = 0
+            elif education == 3:
+                label = 1
+            elif education == 4:
+                label = 2
+            elif education in [5, 6]:
+                label = 3
+            else:
+                raise ValueError(f"Unexpected education label: {education}")
+            example["education_h4"] = label
+            return example
+
+        ds = ds.map(add_h4_education_label)
     
     train_datasets = ds["train"]
     val_datasets = ds["test"]
@@ -274,16 +299,19 @@ if __name__ == "__main__":
             max_length=64,
         )
     tokenized_datasets = ds.map(preprocess_function, batched=True)
+    label_column = args.attribute
     if args.attribute == 'education':
-        tokenized_datasets = tokenized_datasets.class_encode_column("education")
+        if args.education_label_mode == "h4_4class":
+            label_column = "education_h4"
+        tokenized_datasets = tokenized_datasets.class_encode_column(label_column)
     
     tokenized_train_datasets = tokenized_datasets["train"]
     tokenized_val_datasets = tokenized_datasets["test"]
     # tokenized_train_datasets = train_datasets.map(preprocess_function, batched=True)
     # tokenized_val_datasets = val_datasets.map(preprocess_function, batched=True)
         
-    train_inputs,train_labels = tokenized_train_datasets,tokenized_train_datasets[args.attribute]
-    test_inputs,test_labels = tokenized_val_datasets,tokenized_val_datasets[args.attribute]
+    train_inputs,train_labels = tokenized_train_datasets,tokenized_train_datasets[label_column]
+    test_inputs,test_labels = tokenized_val_datasets,tokenized_val_datasets[label_column]
     train_labels = torch.tensor(train_labels).cuda()
     test_labels = torch.tensor(test_labels).cuda()
 
@@ -315,6 +343,21 @@ if __name__ == "__main__":
             acc = attribute_inference_attack(train_cls_embs, test_cls_embs, train_labels, test_labels, args.epoch, args.batch_size, task_type)
             scores.append(acc)
         
-    acc = sum(scores) / len(scores)
+    score = sum(scores) / len(scores)
+    if args.attribute == "education":
+        empirical_privacy = 1 - score
+        print(f"mean attack accuracy: {score}")
+        print(f"empirical privacy: {empirical_privacy}")
+        line = f"{args.test_eta},{args.method_name},{args.attribute},{args.education_label_mode},attack_accuracy,{score}\n"
+        line += f"{args.test_eta},{args.method_name},{args.attribute},{args.education_label_mode},empirical_privacy,{empirical_privacy}\n"
+    elif args.attribute == "age":
+        print(f"mean rmse: {score}")
+        line = f"{args.test_eta},{args.method_name},{args.attribute},none,rmse,{score}\n"
+    else:
+        raise ValueError(f"Invalid attribute: {args.attribute}")
+
+    write_header = not os.path.exists(args.write_to_file)
     with open(args.write_to_file, 'a') as f:
-        f.write(f"{args.test_eta},{acc}\n")
+        if write_header:
+            f.write("eta,method,attribute,label_mode,metric,value\n")
+        f.write(line)

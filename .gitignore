@@ -1,6 +1,7 @@
 __pycache__/
 outputs/
 logs/
+logs_gen/
 *.pyc
 *.png
 *.txt
@@ -16,3 +17,5 @@ logs/
 
 dataset/
 *_model*/
+scripts/
+scripts_gen/

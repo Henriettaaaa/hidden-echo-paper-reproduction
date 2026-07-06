@@ -30,6 +30,19 @@ setup_seed(12399)
 writer: SummaryWriter = None
 
 
+def load_first_available_dataset(candidates):
+    errors = []
+    for candidate in candidates:
+        try:
+            if isinstance(candidate, tuple):
+                name, config = candidate
+                return datasets.load_dataset(name, config)
+            return datasets.load_dataset(candidate)
+        except Exception as exc:
+            errors.append(f"{candidate}: {type(exc).__name__}: {str(exc).splitlines()[0][:160]}")
+    raise RuntimeError("Unable to load dataset from candidates:\n" + "\n".join(errors))
+
+
 def pretrain_generator(g_model, data_loader, embed_layer, privacy_budget, 
                        epochs=200, lr=0.0002, device="cuda", llm_type="qwen2-1.5b"):
     g_model = g_model.to(device)
@@ -239,7 +252,8 @@ def main():
     
     config = AutoConfig.from_pretrained(llm_path)
     tokenizer = AutoTokenizer.from_pretrained(llm_path)
-    tokenizer.pad_token = tokenizer.eos_token
+    if "t5" not in llm_path and tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     if "t5" in llm_path:
         llm = AutoModelForSeq2SeqLM.from_pretrained(llm_path, config=config)
         llm_hidden_size = llm.config.d_model
@@ -303,7 +317,17 @@ def main():
 
     else:
         if dataset_name == "dailymail":
-            ds = datasets.load_dataset('cnn_dailymail_short')
+            local_path = Path("dataset/cnn_dailymail_short")
+            ds = (
+                datasets.load_dataset(local_path.as_posix())
+                if local_path.exists()
+                else load_first_available_dataset(
+                    [
+                        "cnn_dailymail_short",
+                        "determined-ai/cnn_dailymail_short",
+                    ]
+                )
+            )
 
             train_datasets = ds["train"]
             val_datasets = ds["validation"]
@@ -348,7 +372,7 @@ def main():
         
         def preprocess_function(examples):
             return tokenizer(
-                examples[input_field],
+                [prefix + inp for inp in examples[input_field]],
                 truncation=True,
                 padding="max_length",
                 return_tensors="pt",
