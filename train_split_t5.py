@@ -309,13 +309,22 @@ def train(args):
     if custom_config.lst_enable:
         modules_to_save.extend(["client_denoise", "server_downsample"])
 
+    if args.lora_scope == "encoder_decoder":
+        target_modules = r"^(server_encoder|decoder)\..*\.(q|v)$"
+    elif args.lora_scope == "encoder":
+        target_modules = r"^server_encoder\..*\.(q|v)$"
+    elif args.lora_scope == "decoder":
+        target_modules = r"^decoder\..*\.(q|v)$"
+    else:
+        raise ValueError(f"Unknown lora_scope: {args.lora_scope}")
+
     lora_config = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
         inference_mode=False,
         r=args.lora_rank,
         lora_alpha=16,
         lora_dropout=0.05,
-        target_modules=r"^(server_encoder|decoder)\..*\.(q|v)$",
+        target_modules=target_modules,
         bias="none",
         modules_to_save=modules_to_save or None,
     )
@@ -449,6 +458,12 @@ def parse_args():
     parser.add_argument("--train_batch_size", type=int, default=4)
     parser.add_argument("--eval_batch_size", type=int, default=8)
     parser.add_argument("--lora_rank", type=int, default=16)
+    parser.add_argument(
+        "--lora_scope",
+        type=str,
+        default="encoder_decoder",
+        choices=["encoder_decoder", "encoder", "decoder"],
+    )
     parser.add_argument("--warmup_steps", type=int, default=50)
     parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--logging_steps", type=int, default=10)

@@ -2,6 +2,7 @@ __pycache__/
 outputs/
 logs/
 logs_gen/
+logs_gen_ldp_check/
 *.pyc
 *.png
 *.txt
@@ -19,3 +20,4 @@ dataset/
 *_model*/
 scripts/
 scripts_gen/
+scripts_gen_ldp_check/
