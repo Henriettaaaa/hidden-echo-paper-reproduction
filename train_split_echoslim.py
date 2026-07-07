@@ -30,7 +30,7 @@ from utils.model import (
 from utils.dataset import get_glue_dataset
 
 from modeling.my.configuration import AdditionalConfig
-from modeling.my.split import SplittedQwen2ForSequenceClassification
+from modeling.my.split_echoslim import SplittedQwen2ForSequenceClassification
 from torch.utils.data import DataLoader
 import datasets
 import torch.nn.functional
@@ -160,7 +160,7 @@ def main():
         "mi_estimator_hidden_dim": lambda opt: opt.lst_enable and opt.mi_downsample_enable,
     }
 
-    save_path = f"./outputs/train_ckpts/{experiment_name}/"
+    save_path = f"./outputs/train_ckpts/{experiment_name}/EchoSlim-True_"
     for k, v in custom_model_config.__dict__.items():
         if k in names:
             if k in show_if and not show_if[k](custom_model_config):
@@ -423,37 +423,43 @@ def train(
             custom_config.num_reserved_layers,
             custom_config.keep_last_layer,
         )
+    elif custom_config.lst_enable:
+        print(
+            "EchoSlim warning: auto_skip=False, compact denoiser will keep all "
+            "non-skipped layers from lst_skip. Use auto_skip=True for structural sparsity."
+        )
 
-    selected_layers_before_peft = None
-    client_params_before_peft = None
-    client_denoise_state_dict_bytes_before_peft = None
-    client_head_state_dict_bytes_before_peft = None
+    echoslim_selected_layers_before_peft = None
+    echoslim_client_params_before_peft = None
+    echoslim_client_denoise_state_dict_bytes_before_peft = None
+    echoslim_client_head_state_dict_bytes_before_peft = None
     if custom_config.lst_enable:
-        skip_layers = set(model.config.lst_skip or [])
-        skip_layers.discard(-1)
-        selected_layers_before_peft = [
-            idx for idx in range(model.config.num_hidden_layers) if idx not in skip_layers
-        ]
-        client_params_before_peft = model._calc_client_params()
-        client_denoise_state_dict_bytes_before_peft = module_state_dict_nbytes(
+        # EchoSlim 结构稀疏的核心指标必须在 PEFT 包装前统计。
+        # get_peft_model 会把 modules_to_save 包成 wrapper，训练后再数会把保存副本也算进去，
+        # 导致 client 参数量虚高；论文/报告里应使用这里的 before_peft 数值。
+        echoslim_selected_layers_before_peft = list(model.selected_layer_indices)
+        echoslim_client_params_before_peft = model._calc_client_params()
+        # 记录原始 state_dict 字节数，用于支撑“客户端模型驻留/保存开销”分析。
+        echoslim_client_denoise_state_dict_bytes_before_peft = module_state_dict_nbytes(
             model.client_denoise
         )
-        client_head_state_dict_bytes_before_peft = module_state_dict_nbytes(
+        echoslim_client_head_state_dict_bytes_before_peft = module_state_dict_nbytes(
             model.client_head
         )
-        print(f"Selected layers before PEFT: {selected_layers_before_peft}")
-        print(f"Client params before PEFT: {client_params_before_peft}")
+        print(f"EchoSlim selected layers before PEFT: {model.selected_layer_indices}")
+        print(f"EchoSlim client params before PEFT: {echoslim_client_params_before_peft}")
         print(
-            "Client denoise state_dict bytes before PEFT: "
-            f"{client_denoise_state_dict_bytes_before_peft}"
+            "EchoSlim client denoise state_dict bytes before PEFT: "
+            f"{echoslim_client_denoise_state_dict_bytes_before_peft}"
         )
 
     modules_to_save = []
     
-    modules_to_save += [
-        "client_denoise",
-        "server_downsample",
-    ]
+    if custom_config.lst_enable:
+        modules_to_save += [
+            "client_denoise",
+            "server_downsample",
+        ]
 
     print(modules_to_save)
 
@@ -575,16 +581,18 @@ def train(
         f.write(f"embedding_data_transferred: {trainer.model.base_model.total_embedding_data_transferred}\n")
         f.write(f"hiddens_data_transferred: {trainer.model.base_model.total_hidden_states_data_transferred}\n")
         if custom_config.lst_enable:
-            f.write(f"selected_layers: {selected_layers_before_peft}\n")
-            f.write(f"client_params_before_peft: {client_params_before_peft}\n")
+            f.write(f"echoslim_selected_layers: {echoslim_selected_layers_before_peft}\n")
+            f.write(f"echoslim_client_params_before_peft: {echoslim_client_params_before_peft}\n")
             f.write(
-                "client_denoise_state_dict_bytes_before_peft: "
-                f"{client_denoise_state_dict_bytes_before_peft}\n"
+                "echoslim_client_denoise_state_dict_bytes_before_peft: "
+                f"{echoslim_client_denoise_state_dict_bytes_before_peft}\n"
             )
             f.write(
-                "client_head_state_dict_bytes_before_peft: "
-                f"{client_head_state_dict_bytes_before_peft}\n"
+                "echoslim_client_head_state_dict_bytes_before_peft: "
+                f"{echoslim_client_head_state_dict_bytes_before_peft}\n"
             )
+            # 这个值用于调试 PEFT 保存包装后的模型状态，不作为 EchoSlim 端侧参数量主结果。
+            f.write(f"echoslim_client_params_after_peft_wrapped: {trainer.model.base_model._calc_client_params()}\n")
         f.write(f"cuda_peak_allocated_bytes: {cuda_peak_allocated_bytes}\n")
         f.write(f"cuda_peak_reserved_bytes: {cuda_peak_reserved_bytes}\n")
 

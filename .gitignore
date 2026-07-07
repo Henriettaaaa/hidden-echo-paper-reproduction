@@ -3,6 +3,7 @@ outputs/
 logs/
 logs_gen/
 logs_gen_ldp_check/
+logs_opt/
 *.pyc
 *.png
 *.txt
@@ -21,3 +22,4 @@ dataset/
 scripts/
 scripts_gen/
 scripts_gen_ldp_check/
+scripts_opt/

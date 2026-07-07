@@ -70,6 +70,7 @@ def main():
     parser.add_argument('--per_device_train_batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--per_device_eval_batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--num_train_epochs', type=int, default=15, help='Number of epochs for training model')
+    parser.add_argument('--output_suffix', type=str, default='', help='Suffix appended to task output directory')
     
     
     args = parser.parse_args()
@@ -97,6 +98,7 @@ def main():
     per_device_train_batch_size = args.per_device_train_batch_size
     per_device_eval_batch_size = args.per_device_eval_batch_size
     num_train_epochs = args.num_train_epochs
+    output_suffix = args.output_suffix
 
     
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -158,7 +160,7 @@ def main():
         per_device_eval_batch_size=per_device_eval_batch_size,
         use_cpu=use_cpu,
         lora_r=lora_r,
-        save_path=Path(__file__).parent / save_dirname / f"{dataset_name}_privacy_{privacy_budget}",
+        save_path=Path(__file__).parent / save_dirname / f"{dataset_name}_privacy_{privacy_budget}{output_suffix}",
         lr_scheduler_type="constant",
     )
 
@@ -385,11 +387,9 @@ def train(
         seed=123,
         lr_scheduler_type=lr_scheduler_type,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
-        # predict_with_generate=True,
-        # generation_max_length=64,
-        # metric_for_best_model="bleu",
-        # greater_is_better=True,
-        # load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        load_best_model_at_end=True,
     )
 
     trainer = MyTrainer(
@@ -409,6 +409,8 @@ def train(
         trainer.train()
     except KeyboardInterrupt:
         pass
+    print(f"best_model_checkpoint: {trainer.state.best_model_checkpoint}")
+    print(f"best_metric: {trainer.state.best_metric}")
     eval_results = {}
 
     trained_model = trainer.model            

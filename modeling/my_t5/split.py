@@ -792,9 +792,10 @@ class SplittedT5ForConditionalGeneration(T5PreTrainedModel):
                     device=contribution.device,
                 )
                 contribution = contribution * valid_token_mask
-                layer_contribution = contribution.sum(dim=0) / valid_token_mask.sum(
-                    dim=0
-                ).clamp_min(1.0)
+                layer_contribution = (
+                    contribution.sum(dim=(0, 1))
+                    / valid_token_mask.sum().clamp_min(1.0)
+                ).unsqueeze(0)
                 layer_grads.append(layer_contribution)
 
             layer_grads_sum += torch.stack(layer_grads)
