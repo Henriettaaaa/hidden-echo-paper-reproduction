@@ -4,6 +4,7 @@ logs/
 logs_gen/
 logs_gen_ldp_check/
 logs_opt/
+logs_opt_gen/
 *.pyc
 *.png
 *.txt
@@ -23,3 +24,4 @@ scripts/
 scripts_gen/
 scripts_gen_ldp_check/
 scripts_opt/
+scripts_opt_gen/

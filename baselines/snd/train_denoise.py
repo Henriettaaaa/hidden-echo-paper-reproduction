@@ -61,6 +61,7 @@ def main():
     arg_parser.add_argument("--per_device_eval_batch_size", type=int, default=8)
     arg_parser.add_argument("--lora_r", type=int, default=64)
     arg_parser.add_argument("--lr_scheduler_type", type=str, default="constant")
+    arg_parser.add_argument("--output_dir", type=str, default=None)
     args = arg_parser.parse_args()
 
     privacy_budget = args.privacy_budget
@@ -119,7 +120,11 @@ def main():
         per_device_eval_batch_size=per_device_eval_batch_size,
         use_cpu=use_cpu,
         lora_r=lora_r,
-        save_path=Path(__file__).parent / save_dir / f"{privacy_budget}",
+        save_path=(
+            Path(args.output_dir)
+            if args.output_dir is not None
+            else Path(__file__).parent / save_dir / f"{privacy_budget}"
+        ),
         lr_scheduler_type=args.lr_scheduler_type,
         model_type=args.model_type,
     )

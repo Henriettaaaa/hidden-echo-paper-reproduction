@@ -1024,7 +1024,9 @@ class MINE(nn.Module):
         T1 = self.T_func(torch.cat([x_samples, y_shuffle], dim=-1)) # 打乱配对--边缘分布
 
         # 互信息下界估计（可训练），越大越好
-        lower_bound = T0.mean() - torch.log(T1.exp().mean()) 
+        T1_flat = T1.float().reshape(-1)
+        log_mean_exp = torch.logsumexp(T1_flat, dim=0) - T1_flat.new_tensor(T1_flat.numel()).log()
+        lower_bound = T0.float().mean() - log_mean_exp
 
         # compute the negative loss (maximise loss == minimise -loss)
         return lower_bound

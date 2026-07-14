@@ -223,6 +223,14 @@ def main():
     parser.add_argument("--pretrain_epochs", type=int, default=10)
     parser.add_argument("--save_every", type=int, default=2)
     parser.add_argument("--train_epochs", type=int, default=20)
+    parser.add_argument(
+        "--financial_phrasebank_config",
+        type=str,
+        default="sentences_50agree",
+        choices=["sentences_50agree", "sentences_allagree"],
+    )
+    parser.add_argument("--max_length", type=int, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()
 
     
@@ -237,13 +245,25 @@ def main():
     
     if "Qwen" in llm_path:
         llm_type = "qwen2-1.5b"
-        save_path = Path(__file__).parent / f"gan_models/{dataset_name}_privacy_{privacy_budget}"
+        save_path = (
+            Path(args.output_dir)
+            if args.output_dir is not None
+            else Path(__file__).parent / f"gan_models/{dataset_name}_privacy_{privacy_budget}"
+        )
     elif "Llama" in llm_path:
         llm_type = "llama-3.2-1b"
-        save_path = Path(__file__).parent / f"gan_models_llama/{dataset_name}_privacy_{privacy_budget}"
+        save_path = (
+            Path(args.output_dir)
+            if args.output_dir is not None
+            else Path(__file__).parent / f"gan_models_llama/{dataset_name}_privacy_{privacy_budget}"
+        )
     elif "t5" in llm_path:
         llm_type = "t5-large"
-        save_path = Path(__file__).parent / f"gan_models_t5/{dataset_name}_privacy_{privacy_budget}"
+        save_path = (
+            Path(args.output_dir)
+            if args.output_dir is not None
+            else Path(__file__).parent / f"gan_models_t5/{dataset_name}_privacy_{privacy_budget}"
+        )
     else:
         raise ValueError("Unknown LLM model")
     
@@ -285,18 +305,36 @@ def main():
     elif dataset_name == "financial_phrasebank":
         num_labels = 3
         
-        ds = datasets.load_dataset('financial_phrasebank', 'sentences_50agree', revision='main')
-        ds = ds['train'].train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
-
-        train_datasets = ds["train"]
-        val_datasets = ds["test"]
+        ds = datasets.load_dataset(
+            "financial_phrasebank",
+            args.financial_phrasebank_config,
+            revision="main",
+        )["train"]
+        if args.financial_phrasebank_config == "sentences_allagree":
+            expected_size = 1811 + 226 + 227
+            if len(ds) != expected_size:
+                raise ValueError(
+                    f"Expected financial_phrasebank/{args.financial_phrasebank_config} "
+                    f"to contain {expected_size} rows, got {len(ds)}"
+                )
+            ds = ds.train_test_split(
+                train_size=1811,
+                test_size=226 + 227,
+                seed=123,
+                stratify_by_column="label",
+            )
+            train_datasets = ds["train"]
+        else:
+            ds = ds.train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
+            train_datasets = ds["train"]
+        max_length = args.max_length if args.max_length is not None else 256
         def preprocess_function(examples):
             return tokenizer(
                 examples["sentence"],
                 truncation=True,
                 padding="max_length",
                 return_tensors="pt",
-                max_length=256,
+                max_length=max_length,
             )
     
     elif dataset_name == "bbc-news":

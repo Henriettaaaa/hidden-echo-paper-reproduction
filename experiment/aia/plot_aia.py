@@ -41,6 +41,7 @@ def read_aia_csv(path: Path) -> pd.DataFrame:
     if missing:
         raise ValueError(f"{path} missing columns: {sorted(missing)}")
     df["source_file"] = str(path)
+    df["source_mtime"] = path.stat().st_mtime
     return df
 
 
@@ -86,6 +87,12 @@ def plot_metric(
     plt.xlabel("Privacy budget eta", fontsize=7)
     plt.ylabel(ylabel, fontsize=7)
     plt.xticks(xticks, [str(int(x)) for x in xticks])
+    if metric == "empirical_privacy":
+        plt.yticks([0.2, 0.3, 0.4, 0.5, 0.6])
+        plt.ylim(0.18, 0.62)
+    elif metric == "rmse":
+        plt.yticks([11, 12, 13, 14, 15, 16])
+        plt.ylim(10.3, 16.2)
     plt.tick_params(axis="both", labelsize=7)
     plt.xlim(x_min, x_max)
     plt.grid(True, linestyle="--", alpha=0.35)
@@ -113,6 +120,10 @@ def main() -> None:
         raise FileNotFoundError(f"No CSV files found in {args.input_dir}")
 
     df = pd.concat([read_aia_csv(path) for path in csv_paths], ignore_index=True)
+    no_protection = df["method"].map(normalize_method) == "No protection"
+    if no_protection.any():
+        latest_mtime = df.loc[no_protection, "source_mtime"].max()
+        df = df[~no_protection | (df["source_mtime"] == latest_mtime)]
     plot_metric(
         df,
         attribute="age",
@@ -126,7 +137,7 @@ def main() -> None:
         df,
         attribute="education",
         metric="empirical_privacy",
-        ylabel="Empirical Privacy",
+        ylabel="EP",
         output=args.output_dir / "aia_education_ep.png",
         figsize=(args.fig_width, args.fig_height),
         xticks=args.xticks,

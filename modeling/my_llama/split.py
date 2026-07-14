@@ -798,7 +798,9 @@ class MINE(nn.Module):
         T0 = self.T_func(torch.cat([x_samples, y_samples], dim=-1))
         T1 = self.T_func(torch.cat([x_samples, y_shuffle], dim=-1))
 
-        lower_bound = T0.mean() - torch.log(T1.exp().mean())
+        T1_flat = T1.float().reshape(-1)
+        log_mean_exp = torch.logsumexp(T1_flat, dim=0) - T1_flat.new_tensor(T1_flat.numel()).log()
+        lower_bound = T0.float().mean() - log_mean_exp
 
         # compute the negative loss (maximise loss == minimise -loss)
         return lower_bound
@@ -1230,4 +1232,3 @@ class SplittedLlamaForSequenceClassification(LlamaPreTrainedModel):
         self.config.lst_skip = skip_layers
         
         self.server_layer_select.lst_skip = skip_layers
-

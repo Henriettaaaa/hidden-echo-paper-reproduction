@@ -1,4 +1,8 @@
+import argparse
+import gc
+import json
 import os
+from pathlib import Path
 
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
@@ -17,37 +21,35 @@ from torch import nn
 
 from baselines.gan.gan_modeling import Generator
 
-p = '/data/songhanlin/models/Qwen2-1.5B-Instruct'
-model_type = 'qwen2-1.5b'
-# p = 't5-large'
-# model_type = 't5-large'
-# p = 'Llama-3.2-1B-Instruct'
-# model_type = 'llama-3.2-1b'
 
-is_gan = False
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_path", type=str, default="/data/songhanlin/models/Qwen2-1.5B-Instruct")
+    parser.add_argument("--model_type", type=str, default="qwen2-1.5b")
+    parser.add_argument("--dataset_name", type=str, default="financial_phrasebank")
+    parser.add_argument("--financial_phrasebank_config", type=str, default="sentences_allagree")
+    parser.add_argument("--privacy_budgets", type=int, nargs="+", default=[100, 1000, 5000, 6000])
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--num_samples", type=int, default=200)
+    parser.add_argument("--is_gan", action="store_true")
+    parser.add_argument("--generator_dir", type=str, default=None)
+    parser.add_argument("--generator_dir_template", type=str, default=None)
+    parser.add_argument("--generator_checkpoint_template", type=str, default=None)
+    parser.add_argument("--generator_epoch", type=int, default=4)
+    parser.add_argument("--output_json", type=str, default=None)
+    return parser.parse_args()
 
+
+args = parse_args()
+p = args.model_path
+model_type = args.model_type
+dataset_name = args.dataset_name
+privacy_budgets = args.privacy_budgets
 
 tokenizer = AutoTokenizer.from_pretrained(p)
-tokenizer.pad_token_id = tokenizer.eos_token_id
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token_id = tokenizer.eos_token_id
 model = AutoModelForSequenceClassification.from_pretrained(p, torch_dtype=torch.bfloat16)
-
-if is_gan:
-    generator_model = Generator.from_pretrained(
-        "path/to/generator.pth", 
-        model.config.hidden_size, model.config.hidden_size, 2
-    ).to(torch.bfloat16).cuda()
-
-
-# dataset_name = "mrpc"
-dataset_name = "financial_phrasebank"
-# dataset_name = "SetFit/bbc-news"
-# dataset_name = "dailymail"
-# dataset_name = "samsum"
-# dataset_name = "fr2en"
-
-privacy_budgets = [100, 1000, 5000, 6000]
-# privacy_budgets = [1000, 4000, 5000]
-# privacy_budgets = [20,30,40]
 
 
 if dataset_name == "mrpc":
@@ -59,7 +61,7 @@ if dataset_name == "mrpc":
     text_keys = ["sentence1", "sentence2"]
         
 elif dataset_name == "financial_phrasebank":
-    ds = datasets.load_dataset('financial_phrasebank', 'sentences_allagree', revision='main')
+    ds = datasets.load_dataset('financial_phrasebank', args.financial_phrasebank_config, revision='main')
     ds = ds['train'].train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
 
     train_datasets = ds["train"]
@@ -136,7 +138,31 @@ def preprocess_function(examples):
 rouge_metric = evaluate.load("rouge")
 
 
-def m(examples):
+def resolve_generator_checkpoint(budget):
+    if args.generator_checkpoint_template is not None:
+        return args.generator_checkpoint_template.replace("{eta}", str(budget)).replace("{budget}", str(budget))
+    if args.generator_dir_template is not None:
+        generator_dir = args.generator_dir_template.replace("{eta}", str(budget)).replace("{budget}", str(budget))
+        return str(Path(generator_dir) / f"epoch_{args.generator_epoch}" / "generator.pth")
+    if args.generator_dir is not None:
+        return str(Path(args.generator_dir) / f"epoch_{args.generator_epoch}" / "generator.pth")
+    raise ValueError("GAN EIA requires --generator_dir, --generator_dir_template, or --generator_checkpoint_template")
+
+
+def load_generator_for_budget(budget):
+    checkpoint_path = resolve_generator_checkpoint(budget)
+    if not Path(checkpoint_path).exists():
+        raise FileNotFoundError(f"Generator checkpoint not found for budget {budget}: {checkpoint_path}")
+    print(f"loading_generator budget={budget} checkpoint={checkpoint_path}")
+    return Generator.from_pretrained(
+        checkpoint_path,
+        model.config.hidden_size,
+        model.config.hidden_size,
+        2,
+    ).to(torch.bfloat16).eval().cuda()
+
+
+def m(examples, budget, generator_model=None):
     texts = zip(*[examples[key] for key in text_keys])
     texts = [' '.join(t) for t in texts]
     
@@ -146,34 +172,58 @@ def m(examples):
     
     inputs_embeds = embed_layer(input_ids)
     
-    scores = {}
-    
-    for budget in privacy_budgets:
-        noisy_inputs_embeds, _ = get_noisy_embedding(inputs_embeds, budget, True, model_type=model_type)
-        if is_gan:
-            noisy_inputs_embeds = generator_model(noisy_inputs_embeds, None)
-        invert = noisy_inputs_embeds.float() @ inverse_embed_layer
-        invert_tokens = invert.argmax(dim=-1)
-        invert_text = tokenizer.batch_decode(invert_tokens)
+    noisy_inputs_embeds, _ = get_noisy_embedding(inputs_embeds, budget, True, model_type=model_type)
+    if generator_model is not None:
+        noisy_inputs_embeds = generator_model(noisy_inputs_embeds, None)
+    invert = noisy_inputs_embeds.float() @ inverse_embed_layer
+    invert_tokens = invert.argmax(dim=-1)
+    invert_text = tokenizer.batch_decode(invert_tokens)
 
-        score = rouge_metric.compute(predictions=invert_text, references=texts)
-        scores[budget] = score['rouge1']
-    
-    return scores
+    score = rouge_metric.compute(predictions=invert_text, references=texts)
+    return score['rouge1']
 
 total_scores = {}
 
-batch_size = 2
+batch_size = args.batch_size
+num_samples = min(args.num_samples, len(train_datasets))
 with torch.no_grad():
-    # for i in tqdm(range(0, len(val_datasets), batch_size)):
-    for i in tqdm(range(0, 200, batch_size)):
-        examples = train_datasets[i:i+batch_size]
-        scores = m(examples)
-        for budget in privacy_budgets:
-            if budget not in total_scores:
-                total_scores[budget] = []
-            total_scores[budget].append(scores[budget])
-            
+    for budget in privacy_budgets:
+        generator_model = load_generator_for_budget(budget) if args.is_gan else None
+        total_scores[budget] = []
+        for i in tqdm(range(0, num_samples, batch_size), desc=f"budget={budget}"):
+            examples = train_datasets[i:i+batch_size]
+            score = m(examples, budget, generator_model=generator_model)
+            total_scores[budget].append(score)
+        if generator_model is not None:
+            del generator_model
+            gc.collect()
+            torch.cuda.empty_cache()
+
+results = {}
 for budget in privacy_budgets:
+    rouge1 = float(np.mean(total_scores[budget]))
+    ep = float(1 - rouge1)
     print(f"Budget: {budget}")
-    print(1-np.mean(total_scores[budget]))
+    print(ep)
+    results[str(budget)] = {
+        "rouge1": rouge1,
+        "ep": ep,
+    }
+
+if args.output_json is not None:
+    output_json = Path(args.output_json)
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model_path": args.model_path,
+        "model_type": args.model_type,
+        "dataset_name": args.dataset_name,
+        "financial_phrasebank_config": args.financial_phrasebank_config,
+        "is_gan": args.is_gan,
+        "generator_epoch": args.generator_epoch if args.is_gan else None,
+        "privacy_budgets": privacy_budgets,
+        "batch_size": args.batch_size,
+        "num_samples": num_samples,
+        "scores": results,
+    }
+    output_json.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    print(f"saved_json: {output_json}")

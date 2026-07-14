@@ -69,6 +69,7 @@ def main():
     )
     arg_parser.add_argument("--lr_scheduler_type", type=str, default="constant")
     arg_parser.add_argument("--output_dir", type=str, default=None)
+    arg_parser.add_argument("--denoise_model_dir", type=str, default=None)
 
     args = arg_parser.parse_args()
     
@@ -77,7 +78,9 @@ def main():
     dataset_name = args.dataset_name
     model_name = args.model_name
     
-    if "Qwen2" in model_name:
+    if args.denoise_model_dir is not None:
+        denoise_model_checkpoint = Path(args.denoise_model_dir)
+    elif "Qwen2" in model_name:
         denoise_model_checkpoint =  Path( __file__).parent / "denoise_model" / f"{privacy_budget}"
     elif "Llama" in model_name:
         denoise_model_checkpoint =  Path( __file__).parent / "denoise_model_llama" / f"{privacy_budget}"
@@ -86,7 +89,13 @@ def main():
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
-    denoise_model_checkpoint = list(denoise_model_checkpoint.glob("checkpoint-*"))[0]
+    denoise_checkpoints = sorted(
+        denoise_model_checkpoint.glob("checkpoint-*"),
+        key=lambda path: int(path.name.rsplit("-", 1)[-1]),
+    )
+    if not denoise_checkpoints:
+        raise FileNotFoundError(f"No checkpoint-* found under {denoise_model_checkpoint}")
+    denoise_model_checkpoint = denoise_checkpoints[-1]
 
     save_strategy = "epoch"
     save_steps = 100

@@ -836,8 +836,11 @@ class MINE(nn.Module):
         T0 = self.T_func(torch.cat([x_samples, y_samples], dim=-1)) # 真实配对的 (x, y)--联合分布
         T1 = self.T_func(torch.cat([x_samples, y_shuffle], dim=-1)) # 打乱配对--边缘分布
 
-        # 互信息下界估计（可训练），越大越好
-        lower_bound = T0.mean() - torch.log(T1.exp().mean()) 
+        # 互信息下界估计（可训练），越大越好。
+        # log(mean(exp(T1))) 用 logsumexp 等价计算，避免 bf16/高维输入下 exp 溢出。
+        T1_flat = T1.float().reshape(-1)
+        log_mean_exp = torch.logsumexp(T1_flat, dim=0) - T1_flat.new_tensor(T1_flat.numel()).log()
+        lower_bound = T0.float().mean() - log_mean_exp
 
         # compute the negative loss (maximise loss == minimise -loss)
         return lower_bound
@@ -880,39 +883,46 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
 
         if config.lst_enable:
             if config.auto_skip: # 开echo+
-                num_reserved_layers = config.num_reserved_layers + 1
+                reserved_layers = set(range(config.num_hidden_layers)) - set(config.lst_skip or [])
+                reserved_layers.discard(-1)
+                num_reserved_layers = len(reserved_layers)
+                if num_reserved_layers == 0:
+                    num_reserved_layers = config.num_reserved_layers + int(config.keep_last_layer)
             else:
                 num_reserved_layers = sum(
                     1
                     for i in range(config.num_hidden_layers)
                     if i not in config.lst_skip
                 )
-            reduced_hidden_size = config.hidden_size // config.lst_reduce_factor
-            self.mi_estimators = [
-                (
-                    # 创建任务信息和噪声信息，加入loss
-                    MINE(
-                        config.hidden_size,
-                        reduced_hidden_size,
-                        config.mi_estimator_hidden_dim,
-                    ).to(self.device),
-                    MINE(
-                        config.hidden_size,
-                        reduced_hidden_size,
-                        config.mi_estimator_hidden_dim,
-                    ).to(self.device),
-                )
-                for _ in range(num_reserved_layers)
-            ]
-            self.mi_optimizers = [
-                (
-                    torch.optim.Adam(mi[0].parameters(), lr=config.mi_estimator_lr),
-                    torch.optim.Adam(mi[1].parameters(), lr=config.mi_estimator_lr),
-                )
-                for mi in self.mi_estimators
-            ]
+            self._build_mi_estimators(num_reserved_layers)
 
         print(f"Client params: {self._calc_client_params()}")
+
+    def _build_mi_estimators(self, num_layers: int):
+        reduced_hidden_size = self.config.hidden_size // self.config.lst_reduce_factor
+        self.mi_estimators = [
+            (
+                # 创建任务信息和噪声信息，加入loss
+                MINE(
+                    self.config.hidden_size,
+                    reduced_hidden_size,
+                    self.config.mi_estimator_hidden_dim,
+                ).to(self.device),
+                MINE(
+                    self.config.hidden_size,
+                    reduced_hidden_size,
+                    self.config.mi_estimator_hidden_dim,
+                ).to(self.device),
+            )
+            for _ in range(num_layers)
+        ]
+        self.mi_optimizers = [
+            (
+                torch.optim.Adam(mi[0].parameters(), lr=self.config.mi_estimator_lr),
+                torch.optim.Adam(mi[1].parameters(), lr=self.config.mi_estimator_lr),
+            )
+            for mi in self.mi_estimators
+        ]
 
     # 统计 embedding 上传了多少字节
     def _accumulate_embedding_data_transferred(
@@ -1321,8 +1331,12 @@ class SplittedQwen2ForSequenceClassification(Qwen2PreTrainedModel):
         # 是否强制保留最后一层
         if keep_last_layer:
             skip_layers -= {self.config.num_hidden_layers - 1}
-        skip_layers = list(skip_layers)
+        skip_layers = sorted(skip_layers)
 
         self.config.lst_skip = skip_layers
         
         self.server_layer_select.lst_skip = skip_layers
+        selected_layers = [
+            idx for idx in range(self.config.num_hidden_layers) if idx not in skip_layers
+        ]
+        self._build_mi_estimators(len(selected_layers))

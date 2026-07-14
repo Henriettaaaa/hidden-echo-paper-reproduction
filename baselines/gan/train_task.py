@@ -60,6 +60,15 @@ def main():
     parser.add_argument('--per_device_train_batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--per_device_eval_batch_size', type=int, default=64, help='Batch size')
     parser.add_argument('--num_train_epochs', type=int, default=15, help='Number of epochs for training model')
+    parser.add_argument(
+        "--financial_phrasebank_config",
+        type=str,
+        default="sentences_50agree",
+        choices=["sentences_50agree", "sentences_allagree"],
+    )
+    parser.add_argument("--lr_scheduler_type", type=str, default="constant")
+    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--generator_dir", type=str, default=None)
     
     
     args = parser.parse_args()
@@ -110,7 +119,11 @@ def main():
     else:
         raise ValueError(f"Unknown model name: {model_name}")
     
-    generator_checkpoint_path = Path(__file__).parent / generator_checkpoint_dirname / f"{dataset_name}_privacy_{privacy_budget}/epoch_{generator_epoch}/generator.pth"
+    generator_checkpoint_path = (
+        Path(args.generator_dir) / f"epoch_{generator_epoch}" / "generator.pth"
+        if args.generator_dir is not None
+        else Path(__file__).parent / generator_checkpoint_dirname / f"{dataset_name}_privacy_{privacy_budget}/epoch_{generator_epoch}/generator.pth"
+    )
     generator = Generator.from_pretrained(generator_checkpoint_path, model_config.hidden_size, model_config.hidden_size, 2).to(torch.bfloat16).eval().cuda()
 
 
@@ -159,8 +172,13 @@ def main():
         per_device_eval_batch_size=per_device_eval_batch_size,
         use_cpu=use_cpu,
         lora_r=lora_r,
-        save_path=Path(__file__).parent / save_dirname / f"{dataset_name}_privacy_{privacy_budget}",
-        lr_scheduler_type="constant",
+        save_path=(
+            Path(args.output_dir)
+            if args.output_dir is not None
+            else Path(__file__).parent / save_dirname / f"{dataset_name}_privacy_{privacy_budget}"
+        ),
+        lr_scheduler_type=args.lr_scheduler_type,
+        financial_phrasebank_config=args.financial_phrasebank_config,
     )
 
 
@@ -232,6 +250,7 @@ def train(
     lora_r=64,
     save_path="./ckpt",
     lr_scheduler_type="warmup_stable_decay",
+    financial_phrasebank_config="sentences_50agree",
 ):
 
     if dataset_name == "mrpc":
@@ -254,11 +273,38 @@ def train(
     elif dataset_name == "financial_phrasebank":
         num_labels = 3
         
-        ds = datasets.load_dataset('financial_phrasebank', 'sentences_50agree', revision='main')
-        ds = ds['train'].train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
-
-        train_datasets = ds["train"]
-        val_datasets = ds["test"]
+        ds = datasets.load_dataset(
+            "financial_phrasebank",
+            financial_phrasebank_config,
+            revision="main",
+        )["train"]
+        if financial_phrasebank_config == "sentences_allagree":
+            expected_size = 1811 + 226 + 227
+            if len(ds) != expected_size:
+                raise ValueError(
+                    f"Expected financial_phrasebank/{financial_phrasebank_config} "
+                    f"to contain {expected_size} rows, got {len(ds)}"
+                )
+            split = ds.train_test_split(
+                train_size=1811,
+                test_size=226 + 227,
+                seed=123,
+                stratify_by_column="label",
+            )
+            dev_test = split["test"].train_test_split(
+                train_size=226,
+                test_size=227,
+                seed=123,
+                stratify_by_column="label",
+            )
+            train_datasets = split["train"]
+            val_datasets = dev_test["train"]
+            test_datasets = dev_test["test"]
+        else:
+            ds = ds.train_test_split(test_size=0.1, seed=123, stratify_by_column="label")
+            train_datasets = ds["train"]
+            val_datasets = ds["test"]
+            test_datasets = ds["test"]
         def preprocess_function(examples):
             return tokenizer(
                 examples["sentence"],
@@ -286,10 +332,13 @@ def train(
 
     else:
         raise ValueError(f"Unknown dataset name: {dataset_name}")
+    if dataset_name != "financial_phrasebank":
+        test_datasets = val_datasets
 
 
     tokenized_train_dataset = train_datasets.map(preprocess_function, batched=True)
     tokenized_val_dataset = val_datasets.map(preprocess_function, batched=True)
+    tokenized_test_dataset = test_datasets.map(preprocess_function, batched=True)
 
 
     lora_config = LoraConfig(
@@ -383,7 +432,7 @@ def train(
 
     eval_results = {}
     for _ in range(5):
-        eval_result = trainer.evaluate(tokenized_val_dataset)
+        eval_result = trainer.evaluate(tokenized_test_dataset)
         for k, v in eval_result.items():
             if k not in eval_results:
                 eval_results[k] = []
